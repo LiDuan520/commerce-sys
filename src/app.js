@@ -9,7 +9,10 @@ const { notFoundHandler, errorHandler } = require('./common/error-handler');
 const { GoodsService, buildRouter: goodsRouter } = require('./goods');
 const { PriceService, buildRouter: priceRouter } = require('./price');
 const { AuditService, InProcessAuditBus, buildRouter: auditRouter } = require('./audit');
-const { Scheduler } = require('./scheduler');
+const { OrderService, buildRouter: tradeOrderRouter } = require('./trade/order');
+const { PayService, MockChannel, buildRouter: tradePayRouter } = require('./trade/pay');
+const { FulfillService, MockEntitlementAdapter } = require('./trade/fulfill');
+const { TradeScheduler } = require('./trade/scheduler');
 
 function buildApp({ db, auditBus, schedulerEnabled = true, schedulerIntervalMs = 5000, onStarted }) {
   const app = express();
@@ -32,25 +35,39 @@ function buildApp({ db, auditBus, schedulerEnabled = true, schedulerIntervalMs =
   };
   const goodsService = new GoodsService(db, bus, priceFacade, goodsTypeRegistry);
 
+  // ---- 交易模块（二期）----
+  // goodsReader：交易域对商品域的唯一依赖（只读快照 + 原子扣减/回补，受控通道）
+  const goodsReader = createGoodsReader(db, goodsService);
+  const orderService = new OrderService(db, goodsReader, bus);
+  const fulfillService = new FulfillService(db, new MockEntitlementAdapter(), bus);
+  const channels = { MOCK: new MockChannel(process.env.MOCK_CHANNEL_SECRET) };
+  const payService = new PayService(db, orderService, fulfillService, channels, bus);
+
   // ---- 路由组装（RESTful 契约见 api/openapi.yaml） ----
   app.use('/api/v1/goods', goodsRouter(goodsService));
   app.use('/api/v1/goods/:goodsId/price', priceRouter(priceService));
   app.use('/api/v1/audits', auditRouter(auditService));
-
+  // 交易路由（订单 + 支付回调）
+  app.use('/api/v1/trade', tradeOrderRouter(orderService));
+  app.use('/api/v1/trade', tradePayRouter(payService));
   app.get('/healthz', (_req, res) => res.json({ status: 'UP' }));
   app.use(notFoundHandler);
   app.use(errorHandler);
 
   // ---- 定时调度器 ----
   let scheduler = null;
+  let tradeScheduler = null;
   if (schedulerEnabled) {
     scheduler = new Scheduler({
       goodsSvc: goodsService, priceSvc: priceService,
       scheduleRepo: goodsService.schedules, intervalMs: schedulerIntervalMs,
     }).start();
+    // 交易调度：超时关单 + 权益补偿（周期独立，30s 量级）
+    tradeScheduler = new TradeScheduler({ orderSvc: orderService, fulfillSvc: fulfillService }).start();
     app.locals.scheduler = scheduler;
+    app.locals.tradeScheduler = tradeScheduler;
   }
-  if (onStarted) onStarted({ goodsService, priceService, auditService, scheduler });
+  if (onStarted) onStarted({ goodsService, priceService, auditService, scheduler, orderService, payService, fulfillService, tradeScheduler });
   return app;
 }
 
@@ -67,6 +84,27 @@ function createGoodsWriter(db) {
         const { err } = require('./common');
         throw err.notFound(`商品不存在: ${goodsId}`);
       }
+    },
+  };
+}
+
+// ---- 交易域对商品域的只读接口（快照 + 原子库存扣减/回补） ----
+function createGoodsReader(db, goodsSvc) {
+  return {
+    /** 下单快照：直接复用商品模块查询（只读） */
+    async getSnapshot(goodsId) {
+      return goodsSvc.getGoods(goodsId);
+    },
+    /** 防超卖原子扣减：单语句条件更新，0 行 → 库存不足/不在售 */
+    async deductStock(goodsId, quantity) {
+      const [res] = await db.query(
+        `UPDATE goods SET stock = stock - ? WHERE goods_id=? AND status='A' AND stock >= ?`,
+        [quantity, goodsId, quantity]);
+      return res.affectedRows === 1;
+    },
+    /** 取消/关单回补库存 */
+    async restoreStock(goodsId, quantity) {
+      await db.query(`UPDATE goods SET stock = stock + ? WHERE goods_id=?`, [quantity, goodsId]);
     },
   };
 }
