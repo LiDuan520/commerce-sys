@@ -11,6 +11,7 @@ servers:
 tags:
   - name: goods
   - name: price
+  - name: trade
   - name: audit
 
 paths:
@@ -199,6 +200,161 @@ paths:
       responses:
         '200': { description: OK }
 
+  # ================= 交易域（trade）=================
+  /trade/orders:
+    post:
+      tags: [trade]
+      summary: 下单（快照 + 原子扣库存）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOrderRequest' }
+      responses:
+        '201':
+          description: 下单成功（返回待支付订单）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Ok'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Order' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 商品不在售 / 库存不足
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Fail'
+                  - type: object
+                    properties:
+                      detail:
+                        type: object
+                        properties:
+                          code: { type: string, enum: [GOODS_NOT_SELLING, STOCK_NOT_ENOUGH] }
+    get:
+      tags: [trade]
+      summary: 订单列表（分页，可按用户/状态过滤）
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string, maxLength: 32 }
+        - in: query
+          name: status
+          schema: { type: string, enum: [W, P, C, X, R, D] }
+        - $ref: '#/components/parameters/PageNo'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderPage' }
+  /trade/orders/{orderId}:
+    get:
+      tags: [trade]
+      summary: 订单详情
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Ok'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Order' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /trade/orders/{orderId}/timeline:
+    get:
+      tags: [trade]
+      summary: 订单事件时间线（对账）
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Ok'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/TradeEvent' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /trade/orders/{orderId}/cancel:
+    post:
+      tags: [trade]
+      summary: 用户取消订单（仅 W 态，回补库存）
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelOrderRequest' }
+      responses:
+        '200':
+          description: OK（返回 C 态订单）
+        '409': { $ref: '#/components/responses/Conflict' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /trade/orders/{orderId}/pay:
+    post:
+      tags: [trade]
+      summary: 发起支付（创建支付单，返回渠道支付参数）
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InitiatePayRequest' }
+      responses:
+        '200':
+          description: OK（含支付参数）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Ok'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PayParams' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /trade/pay/callback/{channel}:
+    post:
+      tags: [trade]
+      summary: 渠道支付回调（验签 + 幂等；纯文本响应，渠道网关语义）
+      description: |
+        MOCK 渠道验签：HMAC-SHA256(payId|amount|ts, secret)。
+        幂等：重复回调仍返回 200 success；金额不符/验签失败返回 4xx 且不推进订单。
+      parameters:
+        - in: path
+          name: channel
+          required: true
+          schema: { type: string, enum: [MOCK] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayCallback' }
+      responses:
+        '200':
+          description: 成功（含重复回调幂等场景）
+          content: { text/plain: { schema: { type: string, const: success } } }
+        '400': { description: 渠道未知/金额不符, content: { text/plain: { schema: { type: string } } } }
+        '401': { description: 验签失败（签名/时间窗）, content: { text/plain: { schema: { type: string } } } }
+
 components:
   parameters:
     GoodsId:
@@ -214,6 +370,11 @@ components:
       in: query
       name: pageSize
       schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    OrderId:
+      in: path
+      name: orderId
+      required: true
+      schema: { type: string, description: 订单业务单号（雪花） }
 
   responses:
     BadRequest:
@@ -316,3 +477,79 @@ components:
             total: { type: integer }
             pageNo: { type: integer }
             pageSize: { type: integer }
+    # ================= 交易域 schemas =================
+    CreateOrderRequest:
+      type: object
+      required: [goodsId, quantity, userId]
+      properties:
+        goodsId: { type: string, maxLength: 32 }
+        quantity: { type: integer, minimum: 1, maximum: 999 }
+        userId: { type: string, maxLength: 32, description: 买家ID（一期外部账号透传） }
+    CancelOrderRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, maxLength: 32, description: 仅买家本人可取消 }
+    InitiatePayRequest:
+      type: object
+      required: [channel]
+      properties:
+        channel: { type: string, maxLength: 16, enum: [MOCK], description: 支付渠道编码 }
+    Order:
+      type: object
+      properties:
+        orderId: { type: string, description: 业务单号（雪花） }
+        userId: { type: string }
+        goodsId: { type: string }
+        goodsName: { type: string, description: 下单时商品名快照 }
+        goodsType: { type: string, enum: [ROBOT, NT] }
+        unitPrice: { type: integer, description: 成交单价（分，下单时快照） }
+        quantity: { type: integer }
+        totalAmount: { type: integer, description: 总额（分） }
+        status: { type: string, enum: [W, P, C, X, R, D], description: W待支付 P已支付 C已取消 X已关闭(超时) R退款中 D已退款 }
+        payDeadline: { type: [string, 'null'], format: date-time, description: 支付截止（超时关单） }
+        version: { type: integer }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+    OrderPage:
+      type: object
+      properties:
+        code: { type: string }
+        data:
+          type: object
+          properties:
+            list: { type: array, items: { $ref: '#/components/schemas/Order' } }
+            total: { type: integer }
+            pageNo: { type: integer }
+            pageSize: { type: integer }
+    PayParams:
+      type: object
+      description: 发起支付返回（MOCK 渠道沙箱语义：params 即回调所需全字段）
+      properties:
+        payId: { type: string, description: 支付单号（雪花） }
+        orderId: { type: string }
+        channel: { type: string, enum: [MOCK] }
+        amount: { type: integer, description: 应付金额（分） }
+        params:
+          type: object
+          properties:
+            payId: { type: string }
+            amount: { type: integer }
+            ts: { type: integer, description: 时间戳（ms，±5min 时间窗） }
+            sign: { type: string, description: HMAC-SHA256(payId|amount|ts, secret) }
+    PayCallback:
+      type: object
+      required: [payId, amount, ts, sign]
+      properties:
+        payId: { type: string }
+        amount: { type: integer, description: 支付金额（分），须与支付单一致 }
+        ts: { type: integer }
+        sign: { type: string }
+        channelTradeNo: { type: string, description: 渠道方交易号（回填，防重放唯一键） }
+    TradeEvent:
+      type: object
+      properties:
+        orderId: { type: string }
+        eventType: { type: string, enum: [CREATE, PAY_SUCCESS, PAY_FAIL, CANCEL, CLOSE, REFUND_APPLY, REFUND_DONE, ENTITLE_FAIL], description: 事件类型（对账底座） }
+        payload: { type: object, additionalProperties: true }
+        createdAt: { type: string }
