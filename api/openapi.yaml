@@ -1,0 +1,318 @@
+openapi: 3.1.0
+info:
+  title: 经营管理平台（BMP）服务 API — 一期
+  version: 1.0.0
+  description: |
+    商品 / 上下架 / 调价 / 审计 四域能力。
+    金额单位一律为「分」（整数），时间一律 UTC ISO-8601。
+    统一响应包：`{ code, message, data? , detail? }`，code 为稳定错误码。
+servers:
+  - url: /api/v1
+tags:
+  - name: goods
+  - name: price
+  - name: audit
+
+paths:
+  /goods:
+    post:
+      tags: [goods]
+      summary: 创建商品（草稿态 D）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGoodsRequest' }
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Ok'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Goods' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    get:
+      tags: [goods]
+      summary: 分页查询商品列表
+      parameters:
+        - in: query
+          name: typeCode
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string, enum: [D, P, A, S] }
+        - in: query
+          name: keyword
+          schema: { type: string, maxLength: 64 }
+        - $ref: '#/components/parameters/PageNo'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GoodsPage' }
+  /goods/{goodsId}:
+    get:
+      tags: [goods]
+      summary: 商品详情
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { allOf: [ { $ref: '#/components/schemas/Ok' }, { type: object, properties: { data: { $ref: '#/components/schemas/Goods' } } } ] } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [goods]
+      summary: 编辑商品基础信息（乐观锁；在售态仅库存）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateGoodsRequest' }
+      responses:
+        '200': { description: OK }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/listing:
+    post:
+      tags: [goods]
+      summary: 立即上架（D/S → A）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OperatorOnly' } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/delisting:
+    post:
+      tags: [goods]
+      summary: 立即下架（A → S）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OperatorOnly' } } }
+      responses:
+        '200': { description: OK }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/schedule-shelf:
+    post:
+      tags: [goods]
+      summary: 定时上下架（落 W 计划，商品转 P）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleShelfRequest' }
+      responses:
+        '200': { description: OK }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/cancel-schedule:
+    post:
+      tags: [goods]
+      summary: 取消待生效的上下架计划（P 回 D）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OperatorOnly' } } }
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/price/change:
+    post:
+      tags: [price]
+      summary: 立即调价
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PriceRequest' } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /goods/{goodsId}/price/schedule:
+    post:
+      tags: [price]
+      summary: 定时调价（W 方案，到期自动生效）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SchedulePriceRequest' } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/price/cancel:
+    post:
+      tags: [price]
+      summary: 取消待生效调价方案
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OperatorOnly' } } }
+      responses:
+        '200': { description: OK }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /goods/{goodsId}/price/plans:
+    get:
+      tags: [price]
+      summary: 价格履历（按生效时间倒序）
+      parameters:
+        - $ref: '#/components/parameters/GoodsId'
+        - $ref: '#/components/parameters/PageNo'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200': { description: OK }
+  /audits:
+    get:
+      tags: [audit]
+      summary: 审计记录查询
+      parameters:
+        - in: query
+          name: bizType
+          schema: { type: string, enum: [GOODS, PRICE_PLAN, SCHEDULE] }
+        - in: query
+          name: bizId
+          schema: { type: string }
+        - in: query
+          name: operator
+          schema: { type: string }
+        - $ref: '#/components/parameters/PageNo'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200': { description: OK }
+
+components:
+  parameters:
+    GoodsId:
+      in: path
+      name: goodsId
+      required: true
+      schema: { type: string }
+    PageNo:
+      in: query
+      name: pageNo
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      in: query
+      name: pageSize
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    BadRequest:
+      description: 参数校验失败（code=PARAM_INVALID）
+      content: { application/json: { schema: { $ref: '#/components/schemas/Fail' } } }
+    NotFound:
+      description: 资源不存在（code=NOT_FOUND）
+      content: { application/json: { schema: { $ref: '#/components/schemas/Fail' } } }
+    Conflict:
+      description: 状态/并发/唯一性冲突（code=STATE_CONFLICT / DUPLICATE / DUPLICATE_PLAN）
+      content: { application/json: { schema: { $ref: '#/components/schemas/Fail' } } }
+
+  schemas:
+    Ok:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, const: OK }
+        message: { type: string }
+        data: {}
+    Fail:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, enum: [PARAM_INVALID, NOT_FOUND, STATE_CONFLICT, DUPLICATE, DUPLICATE_PLAN, INTERNAL] }
+        message: { type: string }
+        detail: {}
+    CreateGoodsRequest:
+      type: object
+      required: [typeCode, sku, name, operator]
+      properties:
+        typeCode: { type: string, maxLength: 32, description: 已注册类型，如 ROBOT / NT }
+        sku: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 128 }
+        unit: { type: number, exclusiveMinimum: 0, description: NT 面额（NT 必填） }
+        salePrice: { type: integer, minimum: 0, description: 初始售价（分） }
+        marketPrice: { type: integer, minimum: 0 }
+        stock: { type: integer, minimum: -1, default: 0, description: -1 表示无限 }
+        operator: { type: string, maxLength: 64 }
+    UpdateGoodsRequest:
+      type: object
+      required: [version, operator]
+      properties:
+        name: { type: string, maxLength: 128 }
+        unit: { type: number, exclusiveMinimum: 0 }
+        marketPrice: { type: integer, minimum: 0 }
+        stock: { type: integer, minimum: -1 }
+        version: { type: integer, description: 乐观锁版本号 }
+        operator: { type: string }
+    ScheduleShelfRequest:
+      type: object
+      required: [actionCode, effectiveTime, operator]
+      properties:
+        actionCode: { type: string, enum: [DRAFT_TO_ON, ON_AGAIN, OFF_SHELF] }
+        effectiveTime: { type: string, format: date-time, description: 须晚于当前时间（UTC） }
+        operator: { type: string }
+    PriceRequest:
+      type: object
+      required: [price, operator]
+      properties:
+        price: { type: integer, exclusiveMinimum: 0, description: 价格（分） }
+        operator: { type: string }
+        remark: { type: string, maxLength: 255 }
+    SchedulePriceRequest:
+      allOf:
+        - $ref: '#/components/schemas/PriceRequest'
+        - type: object
+          required: [effectiveTime]
+          properties:
+            effectiveTime: { type: string, format: date-time, description: 须晚于当前时间（UTC） }
+    OperatorOnly:
+      type: object
+      required: [operator]
+      properties:
+        operator: { type: string, maxLength: 64 }
+    Goods:
+      type: object
+      properties:
+        goodsId: { type: string }
+        typeCode: { type: string }
+        sku: { type: string }
+        name: { type: string }
+        unit: { type: [number, 'null'] }
+        salePrice: { type: integer, description: 当前生效价（分） }
+        marketPrice: { type: [integer, 'null'] }
+        stock: { type: integer }
+        status: { type: string, enum: [D, P, A, S], description: D草稿 P上架中 A在售 S停售 }
+        effectiveTime: { type: [string, 'null'], format: date-time }
+        version: { type: integer }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+    GoodsPage:
+      type: object
+      properties:
+        code: { type: string }
+        data:
+          type: object
+          properties:
+            list: { type: array, items: { $ref: '#/components/schemas/Goods' } }
+            total: { type: integer }
+            pageNo: { type: integer }
+            pageSize: { type: integer }

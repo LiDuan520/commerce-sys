@@ -1,0 +1,19 @@
+{
+  "name": "commerce-sys",
+  "version": "1.0.0",
+  "description": "经营管理平台（BMP）服务后端 — 一期：商品/上下架/调价/审计",
+  "main": "src/app.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/app.js",
+    "test": "node --test test/integration.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mysql2": "^3.11.5",
+    "zod": "^3.24.1"
+  }
+}
